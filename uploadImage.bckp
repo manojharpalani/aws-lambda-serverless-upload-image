@@ -1,0 +1,150 @@
+'use strict'
+
+const AWS = require('aws-sdk');
+const s3 = new AWS.S3()
+const moment = require('moment');
+const fileType = require('file-type');
+const shortid = require('shortid');
+const documentClient = new AWS.DynamoDB.DocumentClient(); 
+	
+exports.handler = function(event, context, callback) {
+    let request = event.body;
+    let base64String = request.base64String;
+    let buffer = new Buffer(base64String, 'base64');
+    let fileMime = fileType(buffer);
+    let isDisplayImage = event.isDisplayImage == 'true';
+    
+    if (fileMime == null) {
+        return context.fail('File type not specified in input.');
+    }
+    
+    let file = getFile(event.id, fileMime, buffer);
+    let params = file.params;
+    
+    s3.putObject(params, function(err, data) {
+        if (err) {
+            return console.log(err);
+        }
+        initImageInPost(event.id, file.uploadFile.fullPath, isDisplayImage, callback);    
+    });
+}
+
+let getFile = function (id, fileMime, buffer) {
+    let fileExt = fileMime.ext;
+    let now = moment().format('YYYY-MM-DD-HH:mm:ss');
+    let randomName = shortid.generate();
+    let fileName = id + '/' + randomName + '.' + fileExt;
+    let fileFullPath = process.env.S3_HOST_URL + fileName;
+    
+    let params = {
+        Bucket: process.env.S3_BUCKET,
+        Key: fileName,
+        Body: buffer
+    };
+    
+    let uploadFile = {
+        size: buffer.toString('ascii').length,
+        type: fileMime.mime,
+        name: fileName,
+        fullPath: fileFullPath
+    };
+    
+    return {
+      'params': params,
+      'uploadFile': uploadFile
+    };
+    
+}
+
+let addImageToPost = function(postId, newImage, isDisplayImage, callback) {
+	var newImages = [];
+	newImages.push(newImage);
+	var updateExpression = "set #imgs = list_append(#imgs, :nimgs)";
+	
+	var expressionAttributeNames = {
+            "#imgs" : "images"
+    };
+    
+    var expressionAttributeValues = {
+            ":nimgs": newImages
+    };
+    
+	var updatedDateTime = (new Date).getTime();
+	updateExpression += ', updatedDateTime = :updatedDateTime';
+	expressionAttributeValues[':updatedDateTime'] = updatedDateTime;
+	
+    // Update image attribute as well if image being uploaded is 
+    // to be set as display image as well.
+	if (isDisplayImage) {
+	    updateExpression += ', #img = :nimg';
+	    expressionAttributeNames['#img'] = 'image';
+	    expressionAttributeValues[':nimg'] = newImage;
+	}
+	
+	var params = {
+		TableName : process.env.TABLE_NAME,
+		Key: {
+		    "id": postId
+	    },
+	    ConditionExpression: "attribute_exists(#imgs)",
+	    UpdateExpression: updateExpression,
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues:expressionAttributeValues,
+        ReturnValues:"UPDATED_NEW"
+	};
+	documentClient.update(params, function(err, data){
+		if(err){
+		    console.log('Error ' + err);
+		    callback(err, null);
+		}else{
+		    console.log('Response ' + JSON.stringify(data));
+            callback(null, {"image" : newImage});
+		}
+	});
+}
+
+let initImageInPost = function(postId, newImage, isDisplayImage, callback) {
+	var newImages = [];
+	newImages.push(newImage);
+	var updateExpression = "set #imgs = :nimgs";
+	
+	var expressionAttributeNames = {
+            "#imgs" : "images"
+    };
+    
+    var expressionAttributeValues = {
+            ":nimgs": newImages
+    };
+    
+	var updatedDateTime = (new Date).getTime();
+	updateExpression += ', updatedDateTime = :updatedDateTime';
+	expressionAttributeValues[':updatedDateTime'] = updatedDateTime;
+	
+    // Update image attribute as well if image being uploaded is 
+    // to be set as display image as well.
+	if (isDisplayImage) {
+	    updateExpression += ', #img = :nimg';
+	    expressionAttributeNames['#img'] = 'image';
+	    expressionAttributeValues[':nimg'] = newImage;
+	}
+	
+	var params = {
+		TableName : process.env.TABLE_NAME,
+		Key: {
+		    "id": postId
+	    },
+	    ConditionExpression: "attribute_not_exists(#imgs)",
+	    UpdateExpression: updateExpression,
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ReturnValues:"UPDATED_NEW"
+	};
+	documentClient.update(params, function(err, data){
+		if(err){
+	        addImageToPost(postId, newImage, isDisplayImage, callback);
+	    }else{
+		    console.log('Response ' + JSON.stringify(data));
+            callback(null, {"image" : newImage});
+		}
+	});
+}
